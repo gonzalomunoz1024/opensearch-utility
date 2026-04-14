@@ -1,0 +1,86 @@
+spring:
+  application:
+    name: opensearch-utility
+
+server:
+  port: 8080
+
+# OpenSearch Configuration
+opensearch:
+  cluster:
+    url: ${OPENSEARCH_URL:http://localhost:9200}
+    username: ${OPENSEARCH_USERNAME:admin}
+    password: ${OPENSEARCH_PASSWORD:admin}
+    connection-timeout-ms: 5000
+    socket-timeout-ms: 60000
+    max-connections: 100
+    max-connections-per-route: 20
+
+  ssl:
+    enabled: ${OPENSEARCH_SSL_ENABLED:false}
+    verify-hostname: ${OPENSEARCH_SSL_VERIFY_HOSTNAME:true}
+
+# Batch Processing Configuration
+batch:
+  size: 20
+  timeout-seconds: 5
+  max-concurrent-batches: 10
+  buffer-capacity: 1000
+
+# Retry Configuration
+retry:
+  max-attempts: 3
+  backoff-multiplier: 2
+  initial-delay-ms: 1000
+  max-delay-ms: 30000
+
+# Dead Letter Queue Configuration
+dlq:
+  enabled: true
+  log-level: WARN
+  include-payload: true
+  max-payload-size: 10000
+
+# Scheduler Configuration
+scheduler:
+  health-check:
+    enabled: true
+    cron: "0 */5 * * * *"
+    timeout-seconds: 30
+
+# Index Configuration
+index:
+  default-shards: 1
+  default-replicas: 1
+  max-result-window: 10000
+  refresh-interval: 1s
+
+# Search Configuration
+search:
+  default-page-size: 20
+  max-page-size: 10000
+  scroll-timeout: 5m
+
+# Logging Configuration
+logging:
+  level:
+    root: INFO
+    com.opensearch.utility: INFO
+    com.opensearch.utility.core.http: DEBUG
+    com.opensearch.utility.command.document.listeners: INFO
+
+# Actuator Configuration
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: ${spring.application.name}
