@@ -10,7 +10,7 @@ import com.opensearch.utility.command.index.ports.outbound.IndexManagementPort;
 import com.opensearch.utility.core.config.BatchConfig;
 import com.opensearch.utility.core.domain.RetryableEvent;
 import com.opensearch.utility.core.exception.IndexOperationException;
-import lombok.RequiredArgsConstructor;
+import com.opensearch.utility.core.util.IdGenerator;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
@@ -19,18 +19,29 @@ import reactor.core.publisher.Mono;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class DefaultPopulateIndexUseCase implements PopulateIndexUseCase, PopulateIndexPort {
 
     private final CustomerDataSourcePort customerDataSourcePort;
     private final IndexManagementPort indexManagementPort;
     private final ApplicationEventPublisher eventPublisher;
     private final BatchConfig batchConfig;
+    private final IdGenerator idGenerator;
+
+    public DefaultPopulateIndexUseCase(CustomerDataSourcePort customerDataSourcePort,
+                                        IndexManagementPort indexManagementPort,
+                                        ApplicationEventPublisher eventPublisher,
+                                        BatchConfig batchConfig,
+                                        IdGenerator idGenerator) {
+        this.customerDataSourcePort = customerDataSourcePort;
+        this.indexManagementPort = indexManagementPort;
+        this.eventPublisher = eventPublisher;
+        this.batchConfig = batchConfig;
+        this.idGenerator = idGenerator;
+    }
 
     @Override
     public Mono<PopulateStatusResponse> execute(PopulateIndexCommand command) {
@@ -39,10 +50,10 @@ public class DefaultPopulateIndexUseCase implements PopulateIndexUseCase, Popula
 
     @Override
     public Mono<PopulateStatusResponse> populateIndex(PopulateIndexCommand command) {
-        String jobId = UUID.randomUUID().toString();
+        String jobId = idGenerator.generate();
         String correlationId = command.getCorrelationId() != null
                 ? command.getCorrelationId()
-                : UUID.randomUUID().toString();
+                : idGenerator.generate();
 
         log.info("Starting populate job {} for index {} from {}",
                 jobId, command.getTargetIndex(), command.getSourceEndpoint());
@@ -88,8 +99,7 @@ public class DefaultPopulateIndexUseCase implements PopulateIndexUseCase, Popula
     private void publishBatchEvent(String targetIndex, List<Document> documents,
                                     String sourceEndpoint, String correlationId) {
         DocumentBatchReceivedEvent event = DocumentBatchReceivedEvent.builder()
-                .eventId(UUID.randomUUID().toString())
-                .timestamp(Instant.now())
+                .withDefaults()
                 .correlationId(correlationId)
                 .targetIndex(targetIndex)
                 .documents(documents)

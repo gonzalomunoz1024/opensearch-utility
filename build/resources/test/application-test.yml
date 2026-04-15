@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: opensearch-utility-test
+
+# OpenSearch will be configured by Testcontainers
+opensearch:
+  cluster:
+    url: ${OPENSEARCH_URL:http://localhost:9200}
+    username: admin
+    password: admin
+    connection-timeout-ms: 5000
+    socket-timeout-ms: 30000
+
+  ssl:
+    enabled: false
+
+batch:
+  size: 5
+  timeout-seconds: 2
+  max-concurrent-batches: 2
+  buffer-capacity: 100
+
+retry:
+  max-attempts: 3
+  backoff-multiplier: 2
+  initial-delay-ms: 100
+  max-delay-ms: 1000
+
+dlq:
+  enabled: true
+  log-level: INFO
+  include-payload: true
+  max-payload-size: 5000
+
+scheduler:
+  health-check:
+    enabled: false
+
+logging:
+  level:
+    com.opensearch.utility: DEBUG

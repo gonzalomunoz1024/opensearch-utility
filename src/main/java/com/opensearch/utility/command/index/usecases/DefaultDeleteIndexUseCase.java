@@ -5,22 +5,23 @@ import com.opensearch.utility.command.index.domain.event.IndexDeletedEvent;
 import com.opensearch.utility.command.index.ports.inbound.DeleteIndexPort;
 import com.opensearch.utility.command.index.ports.outbound.IndexManagementPort;
 import com.opensearch.utility.core.exception.IndexOperationException;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
-import java.time.Instant;
-import java.util.UUID;
-
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class DefaultDeleteIndexUseCase implements DeleteIndexUseCase, DeleteIndexPort {
 
     private final IndexManagementPort indexManagementPort;
     private final ApplicationEventPublisher eventPublisher;
+
+    public DefaultDeleteIndexUseCase(IndexManagementPort indexManagementPort,
+                                      ApplicationEventPublisher eventPublisher) {
+        this.indexManagementPort = indexManagementPort;
+        this.eventPublisher = eventPublisher;
+    }
 
     @Override
     public Mono<Void> execute(DeleteIndexCommand command) {
@@ -40,9 +41,7 @@ public class DefaultDeleteIndexUseCase implements DeleteIndexUseCase, DeleteInde
                 })
                 .doOnSuccess(v -> {
                     IndexDeletedEvent event = IndexDeletedEvent.builder()
-                            .eventId(UUID.randomUUID().toString())
-                            .timestamp(Instant.now())
-                            .correlationId(UUID.randomUUID().toString())
+                            .withDefaults()
                             .indexName(command.getIndexName())
                             .build();
                     eventPublisher.publishEvent(event);

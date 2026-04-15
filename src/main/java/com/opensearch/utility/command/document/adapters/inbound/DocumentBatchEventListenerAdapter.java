@@ -1,58 +1,112 @@
-package com.opensearch.utility.command.document.listeners;
+package com.opensearch.utility.command.document.adapters.inbound;
 
+import com.opensearch.utility.command.document.domain.BulkOperationResult;
 import com.opensearch.utility.command.document.domain.Document;
 import com.opensearch.utility.command.document.domain.event.DocumentBatchFailedEvent;
 import com.opensearch.utility.command.document.domain.event.DocumentBatchReceivedEvent;
 import com.opensearch.utility.command.document.domain.event.DocumentBatchSavedEvent;
 import com.opensearch.utility.command.document.domain.event.DocumentDeadLetterEvent;
+import com.opensearch.utility.command.document.ports.inbound.DocumentBatchEventListenerPort;
 import com.opensearch.utility.command.document.ports.outbound.DocumentPersistencePort;
+import com.opensearch.utility.core.config.BatchConfig;
 import com.opensearch.utility.core.domain.RetryableEvent;
-import lombok.RequiredArgsConstructor;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
-import org.springframework.scheduling.annotation.Async;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
+import reactor.core.Disposable;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.List;
-import java.util.UUID;
 
 @Slf4j
 @Component
-@RequiredArgsConstructor
-public class DocumentBatchEventListener {
+public class DocumentBatchEventListenerAdapter implements DocumentBatchEventListenerPort<DocumentBatchReceivedEvent> {
+
+    public final Sinks.EmitFailureHandler emitFailureHandler =
+            (signalType, emitResult) -> emitResult.equals(Sinks.EmitResult.FAIL_NON_SERIALIZED);
 
     private final DocumentPersistencePort documentPersistencePort;
     private final ApplicationEventPublisher eventPublisher;
+    private final BatchConfig batchConfig;
 
-    @Async
-    @EventListener
-    public void handleBatchReceived(DocumentBatchReceivedEvent event) {
-        log.info("Processing batch event: {} documents for index {}, reprocessCount: {}",
+    private Sinks.Many<DocumentBatchReceivedEvent> aggregateSink;
+    private Disposable sinkSubscription;
+
+    public DocumentBatchEventListenerAdapter(
+            DocumentPersistencePort documentPersistencePort,
+            ApplicationEventPublisher eventPublisher,
+            BatchConfig batchConfig) {
+        this.documentPersistencePort = documentPersistencePort;
+        this.eventPublisher = eventPublisher;
+        this.batchConfig = batchConfig;
+    }
+
+    @PostConstruct
+    void init() {
+        aggregateSink = Sinks.many()
+                .unicast()
+                .onBackpressureBuffer(new ArrayDeque<>(4096));
+
+        sinkSubscription = aggregateSink
+                .asFlux()
+                .publishOn(Schedulers.boundedElastic(), batchConfig.getMaxConcurrentBatches())
+                .concatMap(this::processBatch)
+                .doOnCancel(() -> log.warn("[BATCH] Document batch stream cancelled"))
+                .doOnComplete(() -> log.info("[BATCH] Document batch stream completed"))
+                .subscribe();
+
+        log.info("[BATCH] Document batch event listener initialized with buffer size 4096");
+    }
+
+    @PreDestroy
+    void cleanup() {
+        if (sinkSubscription != null && !sinkSubscription.isDisposed()) {
+            sinkSubscription.dispose();
+            log.info("[BATCH] Document batch event listener disposed");
+        }
+    }
+
+    @Override
+    @EventListener(DocumentBatchReceivedEvent.class)
+    public void processEvent(DocumentBatchReceivedEvent event) {
+        log.debug("[BATCH] Event received: {} documents for index {}, reprocessCount: {}",
+                event.getBatchSize(), event.getTargetIndex(), event.getReprocessCount());
+        this.aggregateSink.emitNext(event, emitFailureHandler);
+    }
+
+    private Mono<BulkOperationResult> processBatch(DocumentBatchReceivedEvent event) {
+        log.info("[BATCH] Processing batch: {} documents for index {}, reprocessCount: {}",
                 event.getBatchSize(), event.getTargetIndex(), event.getReprocessCount());
 
         long startTime = System.currentTimeMillis();
 
-        documentPersistencePort.bulkSave(event.getTargetIndex(), event.getDocuments())
-                .subscribe(
-                        result -> {
-                            long processingTime = System.currentTimeMillis() - startTime;
+        return documentPersistencePort.bulkSave(event.getTargetIndex(), event.getDocuments())
+                .doOnSuccess(result -> {
+                    long processingTime = System.currentTimeMillis() - startTime;
+                    handleResult(event, result, processingTime);
+                })
+                .onErrorResume(error -> {
+                    log.error("[BATCH] Batch save failed completely: {}", error.getMessage());
+                    handleCompleteFailure(event, error.getMessage());
+                    return Mono.empty();
+                });
+    }
 
-                            if (!result.hasFailures()) {
-                                // All documents saved successfully
-                                publishSuccessEvent(event, processingTime);
-                            } else {
-                                // Some documents failed
-                                handlePartialFailure(event, result.getFailedDocumentIds(),
-                                        buildErrorReason(result.getFailedItems()));
-                            }
-                        },
-                        error -> {
-                            log.error("Batch save failed completely: {}", error.getMessage());
-                            handleCompleteFailure(event, error.getMessage());
-                        }
-                );
+    private void handleResult(DocumentBatchReceivedEvent event, BulkOperationResult result, long processingTime) {
+        if (!result.hasFailures()) {
+            publishSuccessEvent(event, processingTime);
+        } else {
+            List<String> failedDocumentIds = result.getFailedDocumentIds();
+            String errorReason = buildErrorReason(result.getFailedItems());
+            handlePartialFailure(event, failedDocumentIds, errorReason);
+        }
     }
 
     private void publishSuccessEvent(DocumentBatchReceivedEvent event, long processingTime) {
@@ -61,8 +115,7 @@ public class DocumentBatchEventListener {
                 .toList();
 
         DocumentBatchSavedEvent successEvent = DocumentBatchSavedEvent.builder()
-                .eventId(UUID.randomUUID().toString())
-                .timestamp(Instant.now())
+                .withDefaults()
                 .correlationId(event.getCorrelationId())
                 .targetIndex(event.getTargetIndex())
                 .documentCount(event.getBatchSize())
@@ -71,30 +124,26 @@ public class DocumentBatchEventListener {
                 .build();
 
         eventPublisher.publishEvent(successEvent);
-        log.info("Batch saved successfully: {} documents in {}ms",
+        log.info("[BATCH] Batch saved successfully: {} documents in {}ms",
                 event.getBatchSize(), processingTime);
     }
 
     private void handlePartialFailure(DocumentBatchReceivedEvent event,
                                        List<String> failedDocumentIds,
                                        String errorReason) {
-        log.warn("Partial batch failure: {}/{} documents failed",
+        log.warn("[BATCH] Partial batch failure: {}/{} documents failed",
                 failedDocumentIds.size(), event.getBatchSize());
 
-        // Extract failed documents
         List<Document> failedDocuments = event.getDocuments().stream()
                 .filter(doc -> failedDocumentIds.contains(doc.getId()))
                 .toList();
 
         if (event.canRetry()) {
-            // Retry with decremented count
             retryFailedDocuments(event, failedDocuments, errorReason);
         } else {
-            // Send to DLQ
             sendToDeadLetterQueue(event, failedDocuments, errorReason);
         }
 
-        // Publish partial failure event
         publishFailedEvent(event, failedDocumentIds, errorReason);
     }
 
@@ -116,12 +165,12 @@ public class DocumentBatchEventListener {
                                        String errorReason) {
         int newReprocessCount = originalEvent.getReprocessCount() - 1;
 
-        log.info("Retrying {} failed documents, remaining attempts: {}",
+        log.info("[BATCH] Retrying {} failed documents, remaining attempts: {}",
                 failedDocuments.size(), newReprocessCount);
 
         DocumentBatchReceivedEvent retryEvent = originalEvent.toBuilder()
-                .eventId(UUID.randomUUID().toString())
-                .timestamp(Instant.now())
+                .withDefaults()
+                .correlationId(originalEvent.getCorrelationId())
                 .documents(failedDocuments)
                 .reprocessCount(newReprocessCount)
                 .build();
@@ -132,11 +181,10 @@ public class DocumentBatchEventListener {
     private void sendToDeadLetterQueue(DocumentBatchReceivedEvent originalEvent,
                                         List<Document> failedDocuments,
                                         String errorReason) {
-        log.warn("Sending {} documents to DLQ - retry count exhausted", failedDocuments.size());
+        log.warn("[BATCH] Sending {} documents to DLQ - retry count exhausted", failedDocuments.size());
 
         DocumentDeadLetterEvent dlqEvent = DocumentDeadLetterEvent.builder()
-                .eventId(UUID.randomUUID().toString())
-                .timestamp(Instant.now())
+                .withDefaults()
                 .correlationId(originalEvent.getCorrelationId())
                 .targetIndex(originalEvent.getTargetIndex())
                 .documents(failedDocuments)
@@ -152,8 +200,7 @@ public class DocumentBatchEventListener {
                                      List<String> failedDocumentIds,
                                      String errorReason) {
         DocumentBatchFailedEvent failedEvent = DocumentBatchFailedEvent.builder()
-                .eventId(UUID.randomUUID().toString())
-                .timestamp(Instant.now())
+                .withDefaults()
                 .correlationId(event.getCorrelationId())
                 .targetIndex(event.getTargetIndex())
                 .failedDocumentIds(failedDocumentIds)
@@ -164,7 +211,7 @@ public class DocumentBatchEventListener {
         eventPublisher.publishEvent(failedEvent);
     }
 
-    private String buildErrorReason(List<com.opensearch.utility.command.document.domain.BulkOperationResult.BulkItemResult> failedItems) {
+    private String buildErrorReason(List<BulkOperationResult.BulkItemResult> failedItems) {
         if (failedItems.isEmpty()) return "Unknown error";
 
         return failedItems.stream()

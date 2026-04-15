@@ -6,22 +6,23 @@ import com.opensearch.utility.command.index.domain.event.IndexCreatedEvent;
 import com.opensearch.utility.command.index.ports.inbound.CreateIndexPort;
 import com.opensearch.utility.command.index.ports.outbound.IndexManagementPort;
 import com.opensearch.utility.core.exception.IndexOperationException;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
-import java.time.Instant;
-import java.util.UUID;
-
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class DefaultCreateIndexUseCase implements CreateIndexUseCase, CreateIndexPort {
 
     private final IndexManagementPort indexManagementPort;
     private final ApplicationEventPublisher eventPublisher;
+
+    public DefaultCreateIndexUseCase(IndexManagementPort indexManagementPort,
+                                      ApplicationEventPublisher eventPublisher) {
+        this.indexManagementPort = indexManagementPort;
+        this.eventPublisher = eventPublisher;
+    }
 
     @Override
     public Mono<Index> execute(CreateIndexCommand command) {
@@ -45,9 +46,7 @@ public class DefaultCreateIndexUseCase implements CreateIndexUseCase, CreateInde
                 })
                 .doOnSuccess(index -> {
                     IndexCreatedEvent event = IndexCreatedEvent.builder()
-                            .eventId(UUID.randomUUID().toString())
-                            .timestamp(Instant.now())
-                            .correlationId(UUID.randomUUID().toString())
+                            .withDefaults()
                             .index(index)
                             .build();
                     eventPublisher.publishEvent(event);

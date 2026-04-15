@@ -73,7 +73,7 @@ public class RestControllerIndexInboundAdapter {
                 .then(Mono.just(ResponseEntity.noContent().<Void>build()));
     }
 
-    @HeadMapping("/{indexName}")
+    @RequestMapping(value = "/{indexName}", method = RequestMethod.HEAD)
     public Mono<ResponseEntity<Void>> indexExists(@PathVariable String indexName) {
         return indexQueryUseCase.indexExists(indexName)
                 .map(exists -> exists

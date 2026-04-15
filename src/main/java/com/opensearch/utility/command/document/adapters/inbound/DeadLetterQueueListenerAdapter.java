@@ -1,36 +1,29 @@
-package com.opensearch.utility.command.document.listeners;
+package com.opensearch.utility.command.document.adapters.inbound;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.opensearch.utility.command.document.domain.event.DocumentDeadLetterEvent;
 import com.opensearch.utility.core.config.DlqConfig;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
 @Slf4j
 @Component
-@RequiredArgsConstructor
-public class DeadLetterQueueListener {
+public class DeadLetterQueueListenerAdapter {
 
     private final DlqConfig dlqConfig;
     private final ObjectMapper objectMapper;
 
-    public DeadLetterQueueListener(DlqConfig dlqConfig) {
+    public DeadLetterQueueListenerAdapter(DlqConfig dlqConfig, ObjectMapper objectMapper) {
         this.dlqConfig = dlqConfig;
-        this.objectMapper = new ObjectMapper();
-        this.objectMapper.registerModule(new JavaTimeModule());
-        this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        this.objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
+        this.objectMapper = objectMapper;
     }
 
-    @EventListener
+    @EventListener(DocumentDeadLetterEvent.class)
     public void handleDeadLetterEvent(DocumentDeadLetterEvent event) {
         if (!dlqConfig.isEnabled()) {
-            log.debug("DLQ is disabled, skipping event: {}", event.getEventId());
+            log.debug("[DLQ] DLQ is disabled, skipping event: {}", event.getEventId());
             return;
         }
 
@@ -53,7 +46,8 @@ public class DeadLetterQueueListener {
             logMessage.append("-".repeat(80)).append("\n");
             logMessage.append("PAYLOAD:\n");
             try {
-                String payload = objectMapper.writeValueAsString(event.getDocuments());
+                String payload = objectMapper.writerWithDefaultPrettyPrinter()
+                        .writeValueAsString(event.getDocuments());
                 if (payload.length() > dlqConfig.getMaxPayloadSize()) {
                     payload = payload.substring(0, dlqConfig.getMaxPayloadSize()) + "... [TRUNCATED]";
                 }
@@ -65,19 +59,11 @@ public class DeadLetterQueueListener {
 
         logMessage.append("=".repeat(80));
 
-        // Log based on configured level
         switch (dlqConfig.getLogLevel().toUpperCase()) {
-            case "ERROR":
-                log.error(logMessage.toString());
-                break;
-            case "INFO":
-                log.info(logMessage.toString());
-                break;
-            case "DEBUG":
-                log.debug(logMessage.toString());
-                break;
-            default:
-                log.warn(logMessage.toString());
+            case "ERROR" -> log.error(logMessage.toString());
+            case "INFO" -> log.info(logMessage.toString());
+            case "DEBUG" -> log.debug(logMessage.toString());
+            default -> log.warn(logMessage.toString());
         }
     }
 }

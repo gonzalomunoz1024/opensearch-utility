@@ -66,8 +66,8 @@ class DocumentIntegrationTest extends AbstractIntegrationTest {
                 .expectBody(BulkResultResponse.class)
                 .value(response -> {
                     assertThat(response.getTotalDocuments()).isEqualTo(3);
-                    assertThat(response.getSuccessCount()).isEqualTo(3);
-                    assertThat(response.hasFailures()).isFalse();
+                    assertThat(response.getSuccessfulDocuments()).isEqualTo(3);
+                    assertThat(response.isErrors()).isFalse();
                 });
     }
 

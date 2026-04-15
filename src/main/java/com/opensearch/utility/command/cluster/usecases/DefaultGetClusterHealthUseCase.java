@@ -5,22 +5,23 @@ import com.opensearch.utility.command.cluster.domain.ClusterStats;
 import com.opensearch.utility.command.cluster.domain.event.ClusterHealthCheckedEvent;
 import com.opensearch.utility.command.cluster.ports.inbound.GetClusterHealthPort;
 import com.opensearch.utility.command.cluster.ports.outbound.ClusterOperationsPort;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
-import java.time.Instant;
-import java.util.UUID;
-
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class DefaultGetClusterHealthUseCase implements GetClusterHealthUseCase, GetClusterHealthPort {
 
     private final ClusterOperationsPort clusterOperationsPort;
     private final ApplicationEventPublisher eventPublisher;
+
+    public DefaultGetClusterHealthUseCase(ClusterOperationsPort clusterOperationsPort,
+                                           ApplicationEventPublisher eventPublisher) {
+        this.clusterOperationsPort = clusterOperationsPort;
+        this.eventPublisher = eventPublisher;
+    }
 
     @Override
     public Mono<ClusterHealth> getClusterHealth() {
@@ -51,9 +52,7 @@ public class DefaultGetClusterHealthUseCase implements GetClusterHealthUseCase, 
 
     private void publishHealthCheckedEvent(ClusterHealth health, boolean scheduled) {
         ClusterHealthCheckedEvent event = ClusterHealthCheckedEvent.builder()
-                .eventId(UUID.randomUUID().toString())
-                .timestamp(Instant.now())
-                .correlationId(UUID.randomUUID().toString())
+                .withDefaults()
                 .clusterHealth(health)
                 .scheduledCheck(scheduled)
                 .build();

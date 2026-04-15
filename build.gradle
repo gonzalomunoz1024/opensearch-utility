@@ -7,6 +7,16 @@ plugins {
 group = 'com.opensearch'
 version = '1.0.0-SNAPSHOT'
 
+ext {
+    springCloudVersion = "2023.0.3"
+}
+
+dependencyManagement {
+    imports {
+        mavenBom "org.springframework.cloud:spring-cloud-dependencies:${springCloudVersion}"
+    }
+}
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
@@ -31,6 +41,10 @@ dependencies {
 
     // Metrics
     implementation 'io.micrometer:micrometer-registry-prometheus'
+
+    // Spring Cloud Stream with Kafka
+    implementation 'org.springframework.cloud:spring-cloud-stream'
+    implementation 'org.springframework.cloud:spring-cloud-stream-binder-kafka'
 
     // Lombok
     compileOnly 'org.projectlombok:lombok'

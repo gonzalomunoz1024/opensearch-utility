@@ -9,7 +9,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 @Data
-@SuperBuilder
+@SuperBuilder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
 public abstract class BaseEvent {

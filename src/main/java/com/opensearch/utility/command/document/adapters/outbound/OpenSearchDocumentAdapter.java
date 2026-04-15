@@ -2,12 +2,14 @@ package com.opensearch.utility.command.document.adapters.outbound;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.opensearch.utility.command.document.domain.BulkOperationResult;
 import com.opensearch.utility.command.document.domain.Document;
 import com.opensearch.utility.command.document.ports.outbound.DocumentPersistencePort;
 import com.opensearch.utility.core.http.OpenSearchHttpClient;
+import com.opensearch.utility.core.util.IdGenerator;
 import lombok.Data;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
@@ -15,14 +17,22 @@ import reactor.core.publisher.Mono;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class OpenSearchDocumentAdapter implements DocumentPersistencePort {
 
     private final OpenSearchHttpClient httpClient;
+    private final ObjectMapper objectMapper;
+    private final IdGenerator idGenerator;
+
+    public OpenSearchDocumentAdapter(OpenSearchHttpClient httpClient,
+                                      ObjectMapper objectMapper,
+                                      IdGenerator idGenerator) {
+        this.httpClient = httpClient;
+        this.objectMapper = objectMapper;
+        this.idGenerator = idGenerator;
+    }
 
     @Override
     public Mono<BulkOperationResult> bulkSave(String indexName, List<Document> documents) {
@@ -45,7 +55,7 @@ public class OpenSearchDocumentAdapter implements DocumentPersistencePort {
 
     @Override
     public Mono<Document> save(String indexName, Document document) {
-        String docId = document.getId() != null ? document.getId() : UUID.randomUUID().toString();
+        String docId = document.getId() != null ? document.getId() : idGenerator.generate();
         String path = "/" + indexName + "/_doc/" + docId;
 
         return httpClient.put(path, document.getSource(), IndexResponse.class)
@@ -81,7 +91,7 @@ public class OpenSearchDocumentAdapter implements DocumentPersistencePort {
     private String buildBulkRequestBody(String indexName, List<Document> documents) {
         StringBuilder builder = new StringBuilder();
         for (Document doc : documents) {
-            String docId = doc.getId() != null ? doc.getId() : UUID.randomUUID().toString();
+            String docId = doc.getId() != null ? doc.getId() : idGenerator.generate();
 
             // Action line
             builder.append("{\"index\":{\"_index\":\"")
@@ -98,33 +108,12 @@ public class OpenSearchDocumentAdapter implements DocumentPersistencePort {
 
     private String toJson(Map<String, Object> source) {
         if (source == null) return "{}";
-        StringBuilder sb = new StringBuilder("{");
-        boolean first = true;
-        for (Map.Entry<String, Object> entry : source.entrySet()) {
-            if (!first) sb.append(",");
-            sb.append("\"").append(entry.getKey()).append("\":");
-            Object value = entry.getValue();
-            if (value == null) {
-                sb.append("null");
-            } else if (value instanceof String) {
-                sb.append("\"").append(escapeJson((String) value)).append("\"");
-            } else if (value instanceof Number || value instanceof Boolean) {
-                sb.append(value);
-            } else {
-                sb.append("\"").append(escapeJson(value.toString())).append("\"");
-            }
-            first = false;
+        try {
+            return objectMapper.writeValueAsString(source);
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize document source: {}", e.getMessage());
+            return "{}";
         }
-        sb.append("}");
-        return sb.toString();
-    }
-
-    private String escapeJson(String value) {
-        return value.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
     }
 
     private BulkOperationResult mapToBulkOperationResult(BulkResponse response, List<Document> documents) {
