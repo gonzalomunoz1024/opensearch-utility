@@ -20,6 +20,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -51,6 +52,16 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
         Migration migration = createMigration(command);
         migrationStore.put(migration.getId(), migration);
         latestMigrationId.set(migration.getId());
+
+        log.info("================================================================================");
+        log.info("                     OPENSEARCH MIGRATION STARTED                              ");
+        log.info("================================================================================");
+        log.info("Migration ID: {}", migration.getId());
+        log.info("Source: {}", command.getSource().getUrl());
+        log.info("Target: {}", command.getTarget().getUrl());
+        log.info("Dry Run: {}", command.isDryRun());
+        log.info("Migrate Saved Objects: {}", command.isMigrateSavedObjects());
+        log.info("================================================================================");
 
         return validateClusters(sourceCluster, targetCluster)
                 .then(discoverAndMigrateIndices(migration, command, sourceCluster, targetCluster))
@@ -106,14 +117,30 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
         migration.setStatus(MigrationStatus.RUNNING);
         var options = command.getOptionsOrDefault();
 
+        log.info("================================================================================");
+        log.info("                         DISCOVERING INDICES                                   ");
+        log.info("================================================================================");
+
         return sourceCluster.listIndices()
                 .filter(indexData -> shouldMigrateIndex(indexData, command))
                 .collectList()
                 .flatMap(indices -> {
                     migration.setTotalIndices(indices.size());
-                    log.info("Found {} indices to migrate", indices.size());
+
+                    log.info("================================================================================");
+                    log.info("                         MIGRATING USER INDICES                                ");
+                    log.info("================================================================================");
+                    log.info("Found {} user indices to migrate", indices.size());
+
+                    for (Map<String, Object> indexData : indices) {
+                        String indexName = (String) indexData.get("index");
+                        long docCount = parseLong(indexData.get("docs.count"));
+                        log.info("  - {} ({} documents)", indexName, docCount);
+                    }
+                    log.info("--------------------------------------------------------------------------------");
 
                     if (command.isDryRun()) {
+                        log.info("[DRY RUN] Skipping actual migration");
                         // For dry run, just record what would be migrated
                         for (Map<String, Object> indexData : indices) {
                             String indexName = (String) indexData.get("index");
@@ -161,12 +188,13 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
     private Mono<Void> migrateIndex(Map<String, Object> indexData, Migration migration, StartMigrationCommand command,
                                     SourceClusterPort sourceCluster, TargetClusterPort targetCluster) {
         String indexName = (String) indexData.get("index");
+        long docCount = parseLong(indexData.get("docs.count"));
         long startTime = System.currentTimeMillis();
         AtomicLong migratedCount = new AtomicLong(0);
         AtomicLong failedCount = new AtomicLong(0);
         var options = command.getOptionsOrDefault();
 
-        log.info("Starting migration of index: {}", indexName);
+        log.info(">>> MIGRATING INDEX: {} ({} documents)", indexName, docCount);
 
         return targetCluster.indexExists(indexName)
                 .flatMap(exists -> {
@@ -180,11 +208,10 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
                 .then(targetCluster.refreshIndex(indexName))
                 .then(Mono.fromRunnable(() -> {
                     long duration = System.currentTimeMillis() - startTime;
-                    long docCount = parseLong(indexData.get("docs.count"));
                     migration.addIndexResult(IndexMigrationResult.success(
                             indexName, docCount, migratedCount.get(), duration));
-                    log.info("Completed migration of index {} in {}ms: {} documents",
-                            indexName, duration, migratedCount.get());
+                    log.info("<<< COMPLETED INDEX: {} - migrated {} documents in {}ms",
+                            indexName, migratedCount.get(), duration);
                 }))
                 .onErrorResume(e -> {
                     log.error("Failed to migrate index {}: {}", indexName, e.getMessage());
@@ -232,7 +259,10 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
     private Mono<Void> migrateSavedObjects(Migration migration, StartMigrationCommand command,
                                            SourceClusterPort sourceCluster, TargetClusterPort targetCluster) {
         if (!command.isMigrateSavedObjects()) {
-            log.info("Saved objects migration is disabled, skipping");
+            log.info("================================================================================");
+            log.info("                    SAVED OBJECTS MIGRATION - SKIPPED                          ");
+            log.info("================================================================================");
+            log.info("Saved objects migration is disabled in request");
             return Mono.empty();
         }
 
@@ -240,41 +270,101 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
         String dashboardsIndex = options.getSavedObjectsIndex();
         List<String> types = options.getSavedObjectsTypes();
 
+        log.info("================================================================================");
+        log.info("                    MIGRATING SAVED OBJECTS                                    ");
+        log.info("================================================================================");
+        log.info("Source Index: {}", dashboardsIndex);
+        log.info("Types to migrate:");
+        for (String type : types) {
+            log.info("  - {}", type);
+        }
+        log.info("--------------------------------------------------------------------------------");
+
         if (command.isDryRun()) {
-            log.info("Dry run: would migrate saved objects from {}", dashboardsIndex);
+            log.info("[DRY RUN] Skipping actual saved objects migration");
             return Mono.empty();
         }
 
         long startTime = System.currentTimeMillis();
         AtomicLong migratedCount = new AtomicLong(0);
 
-        log.info("Starting saved objects migration from {}", dashboardsIndex);
-
-        Mono<Void> migrationFlow = targetCluster.indexExists(dashboardsIndex)
+        // First check if the source dashboards index exists
+        Mono<Void> migrationFlow = sourceCluster.getDocumentCount(dashboardsIndex)
+                .doOnNext(count -> log.info("Source dashboards index {} has {} total documents", dashboardsIndex, count))
+                .onErrorResume(e -> {
+                    log.warn("Could not count documents in {}: {}", dashboardsIndex, e.getMessage());
+                    return Mono.just(0L);
+                })
+                .then(targetCluster.indexExists(dashboardsIndex))
                 .flatMap(exists -> {
                     if (!exists) {
+                        log.info("Target dashboards index {} does not exist, creating it", dashboardsIndex);
                         return sourceCluster.getIndexSettings(dashboardsIndex)
                                 .zipWith(sourceCluster.getIndexMappings(dashboardsIndex))
                                 .flatMap(tuple -> targetCluster.createIndex(
                                         dashboardsIndex, tuple.getT1(), tuple.getT2()))
+                                .doOnSuccess(v -> log.info("Created dashboards index {} in target", dashboardsIndex))
                                 .onErrorResume(e -> {
                                     log.warn("Could not create dashboards index, it may not exist in source: {}",
                                             e.getMessage());
                                     return Mono.empty();
                                 });
                     }
+                    log.info("Target dashboards index {} already exists", dashboardsIndex);
                     return Mono.empty();
                 })
                 .then(sourceCluster.getSavedObjects(dashboardsIndex, types)
-                        .buffer(options.getBatchSize())
-                        .concatMap(batch -> targetCluster.bulkIndex(dashboardsIndex, batch)
-                                .doOnNext(result -> {
-                                    long successful = result.getItems().stream()
-                                            .filter(BulkOperationResult.BulkItemResult::isSuccess)
-                                            .count();
-                                    migratedCount.addAndGet(successful);
-                                }))
-                        .then())
+                        .collectList()
+                        .flatMap(allDocs -> {
+                            if (allDocs.isEmpty()) {
+                                log.warn("================================================================================");
+                                log.warn("  WARNING: No saved objects found!");
+                                log.warn("  Check if '{}' contains documents with 'type' field matching: {}", dashboardsIndex, types);
+                                log.warn("================================================================================");
+                                return Mono.empty();
+                            }
+
+                            // Count by type for detailed logging
+                            Map<String, Long> typeCounts = new HashMap<>();
+                            for (var doc : allDocs) {
+                                if (doc.getSource() != null) {
+                                    String type = (String) doc.getSource().get("type");
+                                    typeCounts.merge(type != null ? type : "unknown", 1L, Long::sum);
+                                }
+                            }
+
+                            log.info("Found {} saved objects to migrate:", allDocs.size());
+                            for (Map.Entry<String, Long> entry : typeCounts.entrySet()) {
+                                String typeLabel = entry.getKey();
+                                if ("index-pattern".equals(typeLabel)) {
+                                    log.info("  >>> INDEX-PATTERNS: {} found", entry.getValue());
+                                } else if ("visualization".equals(typeLabel)) {
+                                    log.info("  >>> VISUALIZATIONS: {} found", entry.getValue());
+                                } else if ("dashboard".equals(typeLabel)) {
+                                    log.info("  >>> DASHBOARDS: {} found", entry.getValue());
+                                } else if ("search".equals(typeLabel)) {
+                                    log.info("  >>> SAVED SEARCHES: {} found", entry.getValue());
+                                } else {
+                                    log.info("  >>> {}: {} found", typeLabel.toUpperCase(), entry.getValue());
+                                }
+                            }
+                            log.info("--------------------------------------------------------------------------------");
+
+                            return Flux.fromIterable(allDocs)
+                                    .buffer(options.getBatchSize())
+                                    .concatMap(batch -> targetCluster.bulkIndex(dashboardsIndex, batch)
+                                            .doOnNext(result -> {
+                                                long successful = result.getItems().stream()
+                                                        .filter(BulkOperationResult.BulkItemResult::isSuccess)
+                                                        .count();
+                                                migratedCount.addAndGet(successful);
+                                                if (result.isErrors()) {
+                                                    log.warn("Some saved objects failed to index: {}",
+                                                            result.getFailedDocumentIds());
+                                                }
+                                            }))
+                                    .then();
+                        }))
                 .doOnSuccess(v -> {
                     long duration = System.currentTimeMillis() - startTime;
                     migration.addIndexResult(IndexMigrationResult.builder()
@@ -283,7 +373,7 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
                             .migratedCount(migratedCount.get())
                             .durationMs(duration)
                             .build());
-                    log.info("Completed saved objects migration: {} objects in {}ms",
+                    log.info("<<< SAVED OBJECTS MIGRATION COMPLETED: {} objects migrated in {}ms",
                             migratedCount.get(), duration);
                 })
                 .doOnError(e -> {
@@ -305,12 +395,20 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
             migration.setStatus(MigrationStatus.COMPLETED);
         }
 
-        log.info("Migration {} completed. Status: {}, Indices: {}/{}, Documents: {}",
-                migration.getId(),
-                migration.getStatus(),
-                migration.getCompletedIndices(),
-                migration.getTotalIndices(),
-                migration.getMigratedDocuments());
+        log.info("================================================================================");
+        log.info("                     MIGRATION COMPLETED                                       ");
+        log.info("================================================================================");
+        log.info("Migration ID: {}", migration.getId());
+        log.info("Status: {}", migration.getStatus());
+        log.info("Total Indices: {}", migration.getTotalIndices());
+        log.info("Completed Indices: {}", migration.getCompletedIndices());
+        log.info("Failed Indices: {}", migration.getFailedIndices());
+        log.info("Total Documents Migrated: {}", migration.getMigratedDocuments());
+        if (migration.getStartedAt() != null && migration.getCompletedAt() != null) {
+            log.info("Duration: {} seconds",
+                    java.time.Duration.between(migration.getStartedAt(), migration.getCompletedAt()).getSeconds());
+        }
+        log.info("================================================================================");
 
         return Mono.just(migration);
     }

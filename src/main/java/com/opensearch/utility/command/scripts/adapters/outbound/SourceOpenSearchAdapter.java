@@ -101,14 +101,29 @@ public class SourceOpenSearchAdapter implements SourceClusterPort {
 
     @Override
     public Flux<Document> getSavedObjects(String dashboardsIndex, List<String> types) {
-        Map<String, Object> query = new HashMap<>();
-        Map<String, Object> terms = new HashMap<>();
-        terms.put("type", types);
-        query.put("terms", terms);
+        // Build a bool query with should clauses to match both "type" and "type.keyword" fields
+        // This handles different OpenSearch Dashboards index mappings
+        List<Map<String, Object>> shouldClauses = new ArrayList<>();
+
+        // Match on type field (analyzed)
+        Map<String, Object> termsType = new HashMap<>();
+        termsType.put("type", types);
+        shouldClauses.add(Map.of("terms", termsType));
+
+        // Match on type.keyword field (for exact matching)
+        Map<String, Object> termsTypeKeyword = new HashMap<>();
+        termsTypeKeyword.put("type.keyword", types);
+        shouldClauses.add(Map.of("terms", termsTypeKeyword));
+
+        Map<String, Object> boolQuery = new HashMap<>();
+        boolQuery.put("should", shouldClauses);
+        boolQuery.put("minimum_should_match", 1);
 
         Map<String, Object> body = new HashMap<>();
-        body.put("query", query);
+        body.put("query", Map.of("bool", boolQuery));
         body.put("size", 10000);
+
+        log.info("Fetching saved objects from {} with types: {}", dashboardsIndex, types);
 
         return webClient.post()
                 .uri("/{index}/_search", dashboardsIndex)
@@ -123,14 +138,33 @@ public class SourceOpenSearchAdapter implements SourceClusterPort {
                     return handleError(response);
                 })
                 .bodyToMono(SearchResponse.class)
+                .doOnNext(response -> {
+                    if (response.getHits() != null && response.getHits().getTotal() != null) {
+                        log.info("Found {} saved objects in {}", response.getHits().getTotal().getValue(), dashboardsIndex);
+                    }
+                })
                 .flatMapMany(response -> {
                     if (response.getHits() == null || response.getHits().getHits() == null) {
+                        log.warn("No saved objects found in {}", dashboardsIndex);
                         return Flux.empty();
                     }
-                    return Flux.fromIterable(response.getHits().getHits());
+                    List<HitData> hits = response.getHits().getHits();
+                    log.info("Processing {} saved objects from {}", hits.size(), dashboardsIndex);
+
+                    // Log breakdown by type for debugging
+                    Map<String, Long> typeCount = new HashMap<>();
+                    for (HitData hit : hits) {
+                        if (hit.getSource() != null) {
+                            String type = (String) hit.getSource().get("type");
+                            typeCount.merge(type, 1L, Long::sum);
+                        }
+                    }
+                    log.info("Saved objects by type: {}", typeCount);
+
+                    return Flux.fromIterable(hits);
                 })
                 .map(this::mapHitDataToDocument)
-                .doOnComplete(() -> log.debug("Retrieved saved objects from {}", dashboardsIndex));
+                .doOnComplete(() -> log.debug("Completed retrieving saved objects from {}", dashboardsIndex));
     }
 
     private Document mapHitDataToDocument(HitData hit) {

@@ -30,6 +30,15 @@ A REST API utility to migrate indices, documents, visualizations, dashboards, an
     "username": "admin",
     "password": "your-target-password",
     "sslVerify": false
+  },
+  "options": {
+    "batchSize": 1000,
+    "scrollTimeout": "5m",
+    "scrollSize": 1000,
+    "maxConcurrentIndices": 3,
+    "continueOnFailure": true,
+    "savedObjectsIndex": ".opensearch_dashboards",
+    "savedObjectsTypes": ["visualization", "dashboard", "search", "index-pattern"]
   }
 }
 ```
