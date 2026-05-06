@@ -37,14 +37,18 @@ public class StartMigrationRequest {
     public static class ClusterConfig {
         @NotNull(message = "URL is required")
         private String url;
-        @Builder.Default
-        private String username = "admin";
-        @Builder.Default
-        private String password = "admin";
+        @NotNull(message = "Username is required")
+        private String username;
+        @NotNull(message = "Password is required")
+        private String password;
         @Builder.Default
         private int connectionTimeoutMs = 5000;
         @Builder.Default
         private int socketTimeoutMs = 120000;
+        @Builder.Default
+        private boolean sslEnabled = true;
+        @Builder.Default
+        private boolean sslVerify = true;
     }
 
     @Data

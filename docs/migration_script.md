@@ -15,15 +15,21 @@ A REST API utility to migrate indices, documents, visualizations, dashboards, an
 
 ## Request Format
 
-### Minimal Request (Required Fields Only)
+### Minimal Request
 
 ```json
 {
   "source": {
-    "url": "http://localhost:9200"
+    "url": "http://localhost:9200",
+    "username": "admin",
+    "password": "your-source-password",
+    "sslVerify": false
   },
   "target": {
-    "url": "http://localhost:9201"
+    "url": "http://localhost:9201",
+    "username": "admin",
+    "password": "your-target-password",
+    "sslVerify": false
   }
 }
 ```
@@ -33,18 +39,22 @@ A REST API utility to migrate indices, documents, visualizations, dashboards, an
 ```json
 {
   "source": {
-    "url": "http://localhost:9200",
+    "url": "https://localhost:9200",
     "username": "admin",
     "password": "admin",
     "connectionTimeoutMs": 5000,
-    "socketTimeoutMs": 120000
+    "socketTimeoutMs": 120000,
+    "sslEnabled": true,
+    "sslVerify": false
   },
   "target": {
-    "url": "http://localhost:9201",
+    "url": "https://localhost:9201",
     "username": "admin",
     "password": "admin",
     "connectionTimeoutMs": 5000,
-    "socketTimeoutMs": 120000
+    "socketTimeoutMs": 120000,
+    "sslEnabled": true,
+    "sslVerify": false
   },
   "dryRun": false,
   "migrateSavedObjects": true,
@@ -68,16 +78,20 @@ A REST API utility to migrate indices, documents, visualizations, dashboards, an
 |-------|------|----------|---------|-------------|
 | `source` | object | Yes | - | Source cluster configuration |
 | `source.url` | string | Yes | - | Source OpenSearch URL |
-| `source.username` | string | No | `admin` | Source cluster username |
-| `source.password` | string | No | `admin` | Source cluster password |
+| `source.username` | string | Yes | - | Source cluster username |
+| `source.password` | string | Yes | - | Source cluster password |
 | `source.connectionTimeoutMs` | int | No | `5000` | Connection timeout in milliseconds |
 | `source.socketTimeoutMs` | int | No | `120000` | Socket timeout in milliseconds |
+| `source.sslEnabled` | boolean | No | `true` | Enable SSL/TLS |
+| `source.sslVerify` | boolean | No | `true` | Verify SSL certificates (set `false` for self-signed) |
 | `target` | object | Yes | - | Target cluster configuration |
 | `target.url` | string | Yes | - | Target OpenSearch URL |
-| `target.username` | string | No | `admin` | Target cluster username |
-| `target.password` | string | No | `admin` | Target cluster password |
+| `target.username` | string | Yes | - | Target cluster username |
+| `target.password` | string | Yes | - | Target cluster password |
 | `target.connectionTimeoutMs` | int | No | `5000` | Connection timeout in milliseconds |
 | `target.socketTimeoutMs` | int | No | `120000` | Socket timeout in milliseconds |
+| `target.sslEnabled` | boolean | No | `true` | Enable SSL/TLS |
+| `target.sslVerify` | boolean | No | `true` | Verify SSL certificates (set `false` for self-signed) |
 | `dryRun` | boolean | No | `false` | Preview mode - no actual migration |
 | `migrateSavedObjects` | boolean | No | `true` | Migrate dashboards, visualizations, etc. |
 | `includeIndices` | array | No | `null` | Only migrate these indices (null = all) |
@@ -101,8 +115,8 @@ A REST API utility to migrate indices, documents, visualizations, dashboards, an
 curl -X POST http://localhost:8080/api/v1/migration/dry-run \
   -H "Content-Type: application/json" \
   -d '{
-    "source": { "url": "http://localhost:9200" },
-    "target": { "url": "http://localhost:9201" }
+    "source": { "url": "http://localhost:9200", "username": "admin", "password": "source-pass" },
+    "target": { "url": "http://localhost:9201", "username": "admin", "password": "target-pass" }
   }'
 ```
 
@@ -112,8 +126,8 @@ curl -X POST http://localhost:8080/api/v1/migration/dry-run \
 curl -X POST http://localhost:8080/api/v1/migration \
   -H "Content-Type: application/json" \
   -d '{
-    "source": { "url": "http://localhost:9200", "username": "admin", "password": "admin" },
-    "target": { "url": "http://localhost:9201", "username": "admin", "password": "admin" }
+    "source": { "url": "http://localhost:9200", "username": "admin", "password": "source-pass" },
+    "target": { "url": "http://localhost:9201", "username": "admin", "password": "target-pass" }
   }'
 ```
 
@@ -123,8 +137,8 @@ curl -X POST http://localhost:8080/api/v1/migration \
 curl -X POST http://localhost:8080/api/v1/migration \
   -H "Content-Type: application/json" \
   -d '{
-    "source": { "url": "http://localhost:9200" },
-    "target": { "url": "http://localhost:9201" },
+    "source": { "url": "http://localhost:9200", "username": "admin", "password": "source-pass" },
+    "target": { "url": "http://localhost:9201", "username": "admin", "password": "target-pass" },
     "includeIndices": ["products", "customers", "orders"]
   }'
 ```
@@ -135,8 +149,8 @@ curl -X POST http://localhost:8080/api/v1/migration \
 curl -X POST http://localhost:8080/api/v1/migration \
   -H "Content-Type: application/json" \
   -d '{
-    "source": { "url": "http://localhost:9200" },
-    "target": { "url": "http://localhost:9201" },
+    "source": { "url": "http://localhost:9200", "username": "admin", "password": "source-pass" },
+    "target": { "url": "http://localhost:9201", "username": "admin", "password": "target-pass" },
     "excludeIndices": ["logs-2024", "temp-index"]
   }'
 ```
@@ -147,9 +161,32 @@ curl -X POST http://localhost:8080/api/v1/migration \
 curl -X POST http://localhost:8080/api/v1/migration \
   -H "Content-Type: application/json" \
   -d '{
-    "source": { "url": "http://localhost:9200" },
-    "target": { "url": "http://localhost:9201" },
+    "source": { "url": "http://localhost:9200", "username": "admin", "password": "source-pass" },
+    "target": { "url": "http://localhost:9201", "username": "admin", "password": "target-pass" },
     "migrateSavedObjects": false
+  }'
+```
+
+### HTTPS with Self-Signed Certificates
+
+Set `sslVerify: false` to skip certificate verification for self-signed certificates:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/migration \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": {
+      "url": "https://source-cluster:9200",
+      "username": "admin",
+      "password": "source-pass",
+      "sslVerify": false
+    },
+    "target": {
+      "url": "https://target-cluster:9200",
+      "username": "admin",
+      "password": "target-pass",
+      "sslVerify": false
+    }
   }'
 ```
 

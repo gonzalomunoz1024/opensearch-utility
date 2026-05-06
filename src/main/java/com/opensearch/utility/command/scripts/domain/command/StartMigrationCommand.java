@@ -36,6 +36,10 @@ public class StartMigrationCommand {
         private int connectionTimeoutMs = 5000;
         @Builder.Default
         private int socketTimeoutMs = 120000;
+        @Builder.Default
+        private boolean sslEnabled = true;
+        @Builder.Default
+        private boolean sslVerify = true;
     }
 
     @Data

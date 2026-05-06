@@ -78,6 +78,8 @@ public class RestControllerMigrationInboundAdapter {
                 .password(request.getSource().getPassword())
                 .connectionTimeoutMs(request.getSource().getConnectionTimeoutMs())
                 .socketTimeoutMs(request.getSource().getSocketTimeoutMs())
+                .sslEnabled(request.getSource().isSslEnabled())
+                .sslVerify(request.getSource().isSslVerify())
                 .build();
 
         StartMigrationCommand.ClusterConfig targetConfig = StartMigrationCommand.ClusterConfig.builder()
@@ -86,6 +88,8 @@ public class RestControllerMigrationInboundAdapter {
                 .password(request.getTarget().getPassword())
                 .connectionTimeoutMs(request.getTarget().getConnectionTimeoutMs())
                 .socketTimeoutMs(request.getTarget().getSocketTimeoutMs())
+                .sslEnabled(request.getTarget().isSslEnabled())
+                .sslVerify(request.getTarget().isSslVerify())
                 .build();
 
         StartMigrationCommand.MigrationOptions options = null;
