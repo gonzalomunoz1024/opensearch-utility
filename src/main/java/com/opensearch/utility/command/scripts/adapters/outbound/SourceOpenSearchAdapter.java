@@ -101,18 +101,30 @@ public class SourceOpenSearchAdapter implements SourceClusterPort {
 
     @Override
     public Flux<Document> getSavedObjects(String dashboardsIndex, List<String> types) {
+        // Expand types to include both hyphen and underscore variations
+        // e.g., "index-pattern" -> also search for "index_pattern"
+        List<String> expandedTypes = new ArrayList<>(types);
+        for (String type : types) {
+            if (type.contains("-")) {
+                expandedTypes.add(type.replace("-", "_"));
+            }
+            if (type.contains("_")) {
+                expandedTypes.add(type.replace("_", "-"));
+            }
+        }
+
         // Build a bool query with should clauses to match both "type" and "type.keyword" fields
         // This handles different OpenSearch Dashboards index mappings
         List<Map<String, Object>> shouldClauses = new ArrayList<>();
 
         // Match on type field (analyzed)
         Map<String, Object> termsType = new HashMap<>();
-        termsType.put("type", types);
+        termsType.put("type", expandedTypes);
         shouldClauses.add(Map.of("terms", termsType));
 
         // Match on type.keyword field (for exact matching)
         Map<String, Object> termsTypeKeyword = new HashMap<>();
-        termsTypeKeyword.put("type.keyword", types);
+        termsTypeKeyword.put("type.keyword", expandedTypes);
         shouldClauses.add(Map.of("terms", termsTypeKeyword));
 
         Map<String, Object> boolQuery = new HashMap<>();
@@ -123,7 +135,7 @@ public class SourceOpenSearchAdapter implements SourceClusterPort {
         body.put("query", Map.of("bool", boolQuery));
         body.put("size", 10000);
 
-        log.info("Fetching saved objects from {} with types: {}", dashboardsIndex, types);
+        log.info("Fetching saved objects from {} with types: {}", dashboardsIndex, expandedTypes);
 
         return webClient.post()
                 .uri("/{index}/_search", dashboardsIndex)
@@ -165,6 +177,67 @@ public class SourceOpenSearchAdapter implements SourceClusterPort {
                 })
                 .map(this::mapHitDataToDocument)
                 .doOnComplete(() -> log.debug("Completed retrieving saved objects from {}", dashboardsIndex));
+    }
+
+    @Override
+    public Flux<String> findDashboardsIndices() {
+        return webClient.get()
+                .uri("/_cat/indices?format=json")
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, this::handleError)
+                .bodyToFlux(Map.class)
+                .map(m -> (String) m.get("index"))
+                .filter(indexName -> indexName != null &&
+                        (indexName.startsWith(".opensearch_dashboards") ||
+                         indexName.startsWith(".kibana")))
+                .doOnNext(idx -> log.info("Found dashboards index: {}", idx));
+    }
+
+    @Override
+    public Flux<Document> getAllDocuments(String indexName, int maxSize) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("query", Map.of("match_all", Map.of()));
+        body.put("size", maxSize);
+
+        log.info("Fetching ALL documents from {} (max {})", indexName, maxSize);
+
+        return webClient.post()
+                .uri("/{index}/_search", indexName)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, response -> {
+                    if (response.statusCode().value() == 404) {
+                        log.warn("Index {} not found", indexName);
+                        return Mono.empty();
+                    }
+                    return handleError(response);
+                })
+                .bodyToMono(SearchResponse.class)
+                .doOnNext(response -> {
+                    if (response.getHits() != null && response.getHits().getTotal() != null) {
+                        log.info("Total documents in {}: {}", indexName, response.getHits().getTotal().getValue());
+                    }
+                })
+                .flatMapMany(response -> {
+                    if (response.getHits() == null || response.getHits().getHits() == null) {
+                        return Flux.empty();
+                    }
+                    List<HitData> hits = response.getHits().getHits();
+
+                    // Log all unique types found
+                    Map<String, Long> typeCount = new HashMap<>();
+                    for (HitData hit : hits) {
+                        if (hit.getSource() != null) {
+                            String type = (String) hit.getSource().get("type");
+                            typeCount.merge(type != null ? type : "(no type field)", 1L, Long::sum);
+                        }
+                    }
+                    log.info("Document types in {}: {}", indexName, typeCount);
+
+                    return Flux.fromIterable(hits);
+                })
+                .map(this::mapHitDataToDocument);
     }
 
     private Document mapHitDataToDocument(HitData hit) {

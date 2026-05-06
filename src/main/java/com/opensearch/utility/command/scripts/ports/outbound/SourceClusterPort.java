@@ -22,4 +22,14 @@ public interface SourceClusterPort {
     Mono<Long> getDocumentCount(String indexName);
 
     Flux<Document> getSavedObjects(String dashboardsIndex, List<String> types);
+
+    /**
+     * Find all indices matching the OpenSearch Dashboards pattern (e.g., .opensearch_dashboards*, .kibana*)
+     */
+    Flux<String> findDashboardsIndices();
+
+    /**
+     * Get all documents from an index (for debugging saved objects)
+     */
+    Flux<Document> getAllDocuments(String indexName, int maxSize);
 }

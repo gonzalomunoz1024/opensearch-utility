@@ -2,6 +2,7 @@ package com.opensearch.utility.command.scripts.usecases;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.opensearch.utility.command.document.domain.BulkOperationResult;
+import com.opensearch.utility.command.document.domain.Document;
 import com.opensearch.utility.command.scripts.adapters.outbound.SourceOpenSearchAdapter;
 import com.opensearch.utility.command.scripts.adapters.outbound.TargetOpenSearchAdapter;
 import com.opensearch.utility.command.scripts.config.MigrationWebClientFactory;
@@ -20,6 +21,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -267,13 +269,13 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
         }
 
         var options = command.getOptionsOrDefault();
-        String dashboardsIndex = options.getSavedObjectsIndex();
+        String configuredIndex = options.getSavedObjectsIndex();
         List<String> types = options.getSavedObjectsTypes();
 
         log.info("================================================================================");
         log.info("                    MIGRATING SAVED OBJECTS                                    ");
         log.info("================================================================================");
-        log.info("Source Index: {}", dashboardsIndex);
+        log.info("Configured Index: {}", configuredIndex);
         log.info("Types to migrate:");
         for (String type : types) {
             log.info("  - {}", type);
@@ -287,72 +289,171 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
 
         long startTime = System.currentTimeMillis();
         AtomicLong migratedCount = new AtomicLong(0);
+        AtomicReference<String> actualDashboardsIndex = new AtomicReference<>(configuredIndex);
 
-        // First check if the source dashboards index exists
-        Mono<Void> migrationFlow = sourceCluster.getDocumentCount(dashboardsIndex)
-                .doOnNext(count -> log.info("Source dashboards index {} has {} total documents", dashboardsIndex, count))
-                .onErrorResume(e -> {
-                    log.warn("Could not count documents in {}: {}", dashboardsIndex, e.getMessage());
-                    return Mono.just(0L);
+        // First, discover all dashboards indices and pick the right one
+        Mono<Void> migrationFlow = sourceCluster.findDashboardsIndices()
+                .collectList()
+                .flatMap(foundIndices -> {
+                    log.info("================================================================================");
+                    log.info("                    DISCOVERING DASHBOARDS INDEX                               ");
+                    log.info("================================================================================");
+
+                    if (foundIndices.isEmpty()) {
+                        log.warn("No dashboards indices found (searched for .opensearch_dashboards* and .kibana*)");
+                        log.warn("Will try configured index: {}", configuredIndex);
+                    } else {
+                        log.info("Found {} dashboards indices:", foundIndices.size());
+                        for (String idx : foundIndices) {
+                            log.info("  - {}", idx);
+                        }
+
+                        // Prefer exact match, then any .opensearch_dashboards*, then .kibana*
+                        String selectedIndex = configuredIndex;
+                        if (foundIndices.contains(configuredIndex)) {
+                            selectedIndex = configuredIndex;
+                        } else if (!foundIndices.isEmpty()) {
+                            // Pick the first one that matches opensearch_dashboards pattern
+                            selectedIndex = foundIndices.stream()
+                                    .filter(i -> i.startsWith(".opensearch_dashboards"))
+                                    .findFirst()
+                                    .orElse(foundIndices.get(0));
+                        }
+                        actualDashboardsIndex.set(selectedIndex);
+                        log.info(">>> SELECTED DASHBOARDS INDEX: {}", selectedIndex);
+                    }
+                    log.info("--------------------------------------------------------------------------------");
+
+                    return sourceCluster.getDocumentCount(actualDashboardsIndex.get());
                 })
-                .then(targetCluster.indexExists(dashboardsIndex))
+                .doOnNext(count -> log.info("Source dashboards index {} has {} total documents", actualDashboardsIndex.get(), count))
+                .onErrorResume(e -> {
+                    log.warn("Could not count documents in {}: {}", actualDashboardsIndex.get(), e.getMessage());
+                    // Try to get all documents to see what's in there
+                    return sourceCluster.getAllDocuments(actualDashboardsIndex.get(), 100)
+                            .collectList()
+                            .doOnNext(docs -> {
+                                if (!docs.isEmpty()) {
+                                    log.info("Sample of documents found - examining types...");
+                                }
+                            })
+                            .thenReturn(0L);
+                })
+                .then(targetCluster.indexExists(actualDashboardsIndex.get()))
                 .flatMap(exists -> {
                     if (!exists) {
-                        log.info("Target dashboards index {} does not exist, creating it", dashboardsIndex);
-                        return sourceCluster.getIndexSettings(dashboardsIndex)
-                                .zipWith(sourceCluster.getIndexMappings(dashboardsIndex))
+                        log.info("Target dashboards index {} does not exist, creating it", actualDashboardsIndex.get());
+                        return sourceCluster.getIndexSettings(actualDashboardsIndex.get())
+                                .zipWith(sourceCluster.getIndexMappings(actualDashboardsIndex.get()))
                                 .flatMap(tuple -> targetCluster.createIndex(
-                                        dashboardsIndex, tuple.getT1(), tuple.getT2()))
-                                .doOnSuccess(v -> log.info("Created dashboards index {} in target", dashboardsIndex))
+                                        actualDashboardsIndex.get(), tuple.getT1(), tuple.getT2()))
+                                .doOnSuccess(v -> log.info("Created dashboards index {} in target", actualDashboardsIndex.get()))
                                 .onErrorResume(e -> {
                                     log.warn("Could not create dashboards index, it may not exist in source: {}",
                                             e.getMessage());
                                     return Mono.empty();
                                 });
                     }
-                    log.info("Target dashboards index {} already exists", dashboardsIndex);
+                    log.info("Target dashboards index {} already exists", actualDashboardsIndex.get());
                     return Mono.empty();
                 })
-                .then(sourceCluster.getSavedObjects(dashboardsIndex, types)
+                .then(sourceCluster.getSavedObjects(actualDashboardsIndex.get(), types)
                         .collectList()
                         .flatMap(allDocs -> {
                             if (allDocs.isEmpty()) {
                                 log.warn("================================================================================");
-                                log.warn("  WARNING: No saved objects found!");
-                                log.warn("  Check if '{}' contains documents with 'type' field matching: {}", dashboardsIndex, types);
+                                log.warn("  WARNING: No saved objects found with type filter!");
+                                log.warn("  Index: {}", actualDashboardsIndex.get());
+                                log.warn("  Types searched: {}", types);
+                                log.warn("  Trying to fetch ALL documents to diagnose...");
                                 log.warn("================================================================================");
-                                return Mono.empty();
+
+                                // Fetch all documents to see what types exist
+                                return sourceCluster.getAllDocuments(actualDashboardsIndex.get(), 1000)
+                                        .collectList()
+                                        .flatMap(allDocsUnfiltered -> {
+                                            if (allDocsUnfiltered.isEmpty()) {
+                                                log.warn("Index {} appears to be empty", actualDashboardsIndex.get());
+                                                return Mono.empty();
+                                            }
+                                            log.info("Found {} total documents in {} (unfiltered)", allDocsUnfiltered.size(), actualDashboardsIndex.get());
+
+                                            // These are all saved objects, migrate them all
+                                            return Flux.fromIterable(allDocsUnfiltered)
+                                                    .buffer(options.getBatchSize())
+                                                    .concatMap(batch -> targetCluster.bulkIndex(actualDashboardsIndex.get(), batch)
+                                                            .doOnNext(result -> {
+                                                                long successful = result.getItems().stream()
+                                                                        .filter(BulkOperationResult.BulkItemResult::isSuccess)
+                                                                        .count();
+                                                                migratedCount.addAndGet(successful);
+                                                            }))
+                                                    .then();
+                                        });
                             }
 
-                            // Count by type for detailed logging
-                            Map<String, Long> typeCounts = new HashMap<>();
+                            // Separate documents by type
+                            List<Document> indexPatterns = new ArrayList<>();
+                            List<Document> visualizations = new ArrayList<>();
+                            List<Document> dashboards = new ArrayList<>();
+                            List<Document> savedSearches = new ArrayList<>();
+                            List<Document> otherObjects = new ArrayList<>();
+
                             for (var doc : allDocs) {
                                 if (doc.getSource() != null) {
                                     String type = (String) doc.getSource().get("type");
-                                    typeCounts.merge(type != null ? type : "unknown", 1L, Long::sum);
+                                    if ("index-pattern".equals(type) || "index_pattern".equals(type)) {
+                                        indexPatterns.add(doc);
+                                    } else if ("visualization".equals(type)) {
+                                        visualizations.add(doc);
+                                    } else if ("dashboard".equals(type)) {
+                                        dashboards.add(doc);
+                                    } else if ("search".equals(type)) {
+                                        savedSearches.add(doc);
+                                    } else {
+                                        otherObjects.add(doc);
+                                    }
                                 }
                             }
 
-                            log.info("Found {} saved objects to migrate:", allDocs.size());
-                            for (Map.Entry<String, Long> entry : typeCounts.entrySet()) {
-                                String typeLabel = entry.getKey();
-                                if ("index-pattern".equals(typeLabel)) {
-                                    log.info("  >>> INDEX-PATTERNS: {} found", entry.getValue());
-                                } else if ("visualization".equals(typeLabel)) {
-                                    log.info("  >>> VISUALIZATIONS: {} found", entry.getValue());
-                                } else if ("dashboard".equals(typeLabel)) {
-                                    log.info("  >>> DASHBOARDS: {} found", entry.getValue());
-                                } else if ("search".equals(typeLabel)) {
-                                    log.info("  >>> SAVED SEARCHES: {} found", entry.getValue());
-                                } else {
-                                    log.info("  >>> {}: {} found", typeLabel.toUpperCase(), entry.getValue());
+                            log.info("Found {} total saved objects to migrate", allDocs.size());
+
+                            // =====================================================================
+                            // INDEX PATTERNS - THE IMPORTANT STUFF
+                            // =====================================================================
+                            log.info("================================================================================");
+                            log.info("                    MIGRATING USER INDEX PATTERNS                              ");
+                            log.info("================================================================================");
+                            if (indexPatterns.isEmpty()) {
+                                log.warn("  NO INDEX PATTERNS FOUND!");
+                            } else {
+                                log.info("  Found {} index pattern(s):", indexPatterns.size());
+                                for (var pattern : indexPatterns) {
+                                    String title = pattern.getSource() != null ?
+                                            (String) pattern.getSource().get("title") : "unknown";
+                                    log.info("    - {}", title);
                                 }
+                            }
+                            log.info("================================================================================");
+
+                            // Other saved objects summary
+                            if (!visualizations.isEmpty()) {
+                                log.info("  VISUALIZATIONS: {} found", visualizations.size());
+                            }
+                            if (!dashboards.isEmpty()) {
+                                log.info("  DASHBOARDS: {} found", dashboards.size());
+                            }
+                            if (!savedSearches.isEmpty()) {
+                                log.info("  SAVED SEARCHES: {} found", savedSearches.size());
+                            }
+                            if (!otherObjects.isEmpty()) {
+                                log.info("  OTHER OBJECTS: {} found", otherObjects.size());
                             }
                             log.info("--------------------------------------------------------------------------------");
 
                             return Flux.fromIterable(allDocs)
                                     .buffer(options.getBatchSize())
-                                    .concatMap(batch -> targetCluster.bulkIndex(dashboardsIndex, batch)
+                                    .concatMap(batch -> targetCluster.bulkIndex(actualDashboardsIndex.get(), batch)
                                             .doOnNext(result -> {
                                                 long successful = result.getItems().stream()
                                                         .filter(BulkOperationResult.BulkItemResult::isSuccess)
@@ -368,7 +469,7 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
                 .doOnSuccess(v -> {
                     long duration = System.currentTimeMillis() - startTime;
                     migration.addIndexResult(IndexMigrationResult.builder()
-                            .indexName(dashboardsIndex + " (saved objects)")
+                            .indexName(actualDashboardsIndex.get() + " (saved objects)")
                             .success(true)
                             .migratedCount(migratedCount.get())
                             .durationMs(duration)
@@ -379,7 +480,7 @@ public class DefaultMigrationUseCase implements MigrationUseCase {
                 .doOnError(e -> {
                     log.warn("Saved objects migration failed (non-critical): {}", e.getMessage());
                     migration.addIndexResult(IndexMigrationResult.failure(
-                            dashboardsIndex + " (saved objects)", e.getMessage()));
+                            actualDashboardsIndex.get() + " (saved objects)", e.getMessage()));
                 })
                 .onErrorResume(e -> Mono.empty());
 
