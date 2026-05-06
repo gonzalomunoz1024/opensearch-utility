@@ -3,7 +3,7 @@ spring:
     name: opensearch-utility
   cloud:
     function:
-      definition: topicAConsumer;topicBConsumer;topicCConsumer;topicDConsumer;topicEConsumer;topicFConsumer;topicGConsumer;topicHConsumer
+      definition: topicAConsumer;topicBConsumer
     stream:
       kafka:
         binder:
@@ -22,36 +22,6 @@ spring:
             concurrency: 1
         topicBConsumer-in-0:
           destination: topic-b
-          group: ${KAFKA_CONSUMER_GROUP:opensearch-utility}
-          consumer:
-            concurrency: 1
-        topicCConsumer-in-0:
-          destination: topic-c
-          group: ${KAFKA_CONSUMER_GROUP:opensearch-utility}
-          consumer:
-            concurrency: 1
-        topicDConsumer-in-0:
-          destination: topic-d
-          group: ${KAFKA_CONSUMER_GROUP:opensearch-utility}
-          consumer:
-            concurrency: 1
-        topicEConsumer-in-0:
-          destination: topic-e
-          group: ${KAFKA_CONSUMER_GROUP:opensearch-utility}
-          consumer:
-            concurrency: 1
-        topicFConsumer-in-0:
-          destination: topic-f
-          group: ${KAFKA_CONSUMER_GROUP:opensearch-utility}
-          consumer:
-            concurrency: 1
-        topicGConsumer-in-0:
-          destination: topic-g
-          group: ${KAFKA_CONSUMER_GROUP:opensearch-utility}
-          consumer:
-            concurrency: 1
-        topicHConsumer-in-0:
-          destination: topic-h
           group: ${KAFKA_CONSUMER_GROUP:opensearch-utility}
           consumer:
             concurrency: 1
